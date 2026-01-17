@@ -1,13 +1,18 @@
-package com.example.routes
+package com.example.models
 
-import io.ktor.server.application.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
-
-fun Application.productRoutes() {
-    routing {
-        get("/health") {
-            call.respondText("Ktor is alive 🚀")
-        }
+object VatRules {
+    private val vatRates = mapOf(
+        "Sweden" to 0.25,
+        "Germany" to 0.19,
+        "France" to 0.20
+    )
+    
+    fun getVatRate(country: String): Double {
+        return vatRates[country] ?: 0.0
+    }
+    
+    fun calculateFinalPrice(basePrice: Double, totalDiscountPercent: Double, country: String): Double {
+        val vatRate = getVatRate(country)
+        return basePrice * (1 - totalDiscountPercent / 100.0) * (1 + vatRate)
     }
 }

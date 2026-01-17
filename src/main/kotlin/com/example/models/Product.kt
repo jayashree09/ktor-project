@@ -1,13 +1,34 @@
-package com.example.routes
+package com.example.models
 
-import io.ktor.server.application.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
+import kotlinx.serialization.Serializable
 
-fun Application.productRoutes() {
-    routing {
-        get("/health") {
-            call.respondText("Ktor is alive 🚀")
+@Serializable
+data class Product(
+    val id: String,
+    val name: String,
+    val basePrice: Double,
+    val country: String,
+    val discounts: List<Discount> = emptyList()
+) {
+    val finalPrice: Double
+        get() {
+            val totalDiscountPercent = discounts.sumOf { it.percent }
+            return VatRules.calculateFinalPrice(basePrice, totalDiscountPercent, country)
         }
-    }
 }
+
+@Serializable
+data class ProductResponse(
+    val id: String,
+    val name: String,
+    val basePrice: Double,
+    val country: String,
+    val discounts: List<Discount>,
+    val finalPrice: Double
+)
+
+@Serializable
+data class ApplyDiscountRequest(
+    val discountId: String,
+    val percent: Double
+)

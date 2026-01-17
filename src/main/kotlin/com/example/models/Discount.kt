@@ -1,13 +1,15 @@
-package com.example.routes
+package com.example.models
 
-import io.ktor.server.application.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
+import kotlinx.serialization.Serializable
 
-fun Application.productRoutes() {
-    routing {
-        get("/health") {
-            call.respondText("Ktor is alive 🚀")
+@Serializable
+data class Discount(
+    val discountId: String,
+    val percent: Double
+) {
+    init {
+        require(percent > 0 && percent < 100) {
+            "Discount percentage must be between 0 and 100 (exclusive)"
         }
     }
 }

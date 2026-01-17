@@ -8,9 +8,6 @@ object DiscountValidator {
     private const val MAX_TOTAL_DISCOUNT_PERCENT = 100.0
     private val DISCOUNT_ID_PATTERN = Regex("^[A-Za-z0-9_-]+$")
     
-    /**
-     * Validates discount ID format and length
-     */
     fun validateDiscountId(discountId: String): ValidationResult {
         if (discountId.isBlank()) {
             return ValidationResult.Error("Discount ID cannot be blank or empty")
@@ -27,9 +24,6 @@ object DiscountValidator {
         return ValidationResult.Success
     }
     
-    /**
-     * Validates discount percentage range
-     */
     fun validateDiscountPercent(percent: Double): ValidationResult {
         if (percent <= 0) {
             return ValidationResult.Error("Discount percentage must be greater than 0")
@@ -42,9 +36,6 @@ object DiscountValidator {
         return ValidationResult.Success
     }
     
-    /**
-     * Validates that the cumulative discount doesn't exceed maximum
-     */
     fun validateCumulativeDiscount(existingDiscounts: List<Discount>, newDiscountPercent: Double): ValidationResult {
         val totalDiscount = existingDiscounts.sumOf { it.percent } + newDiscountPercent
         
@@ -59,9 +50,6 @@ object DiscountValidator {
         return ValidationResult.Success
     }
     
-    /**
-     * Validates that product doesn't exceed maximum number of discounts
-     */
     fun validateMaxDiscounts(existingDiscounts: List<Discount>): ValidationResult {
         if (existingDiscounts.size >= MAX_DISCOUNTS_PER_PRODUCT) {
             return ValidationResult.Error(
@@ -73,31 +61,23 @@ object DiscountValidator {
         return ValidationResult.Success
     }
     
-    /**
-     * Comprehensive validation of a new discount
-     */
     fun validateNewDiscount(discount: Discount, existingDiscounts: List<Discount>): ValidationResult {
-        // Validate discount ID
         validateDiscountId(discount.discountId).let { result ->
             if (result is ValidationResult.Error) return result
         }
         
-        // Validate discount percentage
         validateDiscountPercent(discount.percent).let { result ->
             if (result is ValidationResult.Error) return result
         }
         
-        // Check if discount already exists
         if (existingDiscounts.any { it.discountId == discount.discountId }) {
             return ValidationResult.Error("Discount '${discount.discountId}' already applied to this product")
         }
         
-        // Validate max discounts limit
         validateMaxDiscounts(existingDiscounts).let { result ->
             if (result is ValidationResult.Error) return result
         }
         
-        // Validate cumulative discount
         validateCumulativeDiscount(existingDiscounts, discount.percent).let { result ->
             if (result is ValidationResult.Error) return result
         }

@@ -9,7 +9,6 @@ import com.example.routes.productRoutes
 import com.example.database.DatabaseConfig
 
 fun main() {
-    // Initialize database connection
     DatabaseConfig.init()
     
     embeddedServer(Netty, port = 8080) {

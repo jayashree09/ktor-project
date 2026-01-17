@@ -25,7 +25,6 @@ object DatabaseConfig {
         val dataSource = HikariDataSource(config)
         Database.connect(dataSource)
         
-        // Create tables
         transaction {
             SchemaUtils.create(ProductsTable, DiscountsTable)
         }

@@ -16,8 +16,6 @@ object DiscountsTable : Table("discounts") {
     val percent: Column<Double> = double("percent")
     
     init {
-        // Create unique constraint on (product_id, discount_id) to prevent duplicate discounts
-        // This is the key to concurrency safety at the database level
         uniqueIndex(productId, discountId)
     }
 }

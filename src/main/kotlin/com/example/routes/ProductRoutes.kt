@@ -94,7 +94,6 @@ fun Application.productRoutes() {
             try {
                 val request = call.receive<ApplyDiscountRequest>()
                 
-                // Get existing product for validation
                 val existingProduct = productRepository.getProductById(productId)
                 if (existingProduct == null) {
                     call.respond(
@@ -107,13 +106,11 @@ fun Application.productRoutes() {
                     return@put
                 }
                 
-                // Validate discount request
                 val discount = Discount(
                     discountId = request.discountId,
                     percent = request.percent
                 )
                 
-                // Comprehensive validation
                 val validationResult = DiscountValidator.validateNewDiscount(discount, existingProduct.discounts)
                 if (validationResult is com.example.validation.ValidationResult.Error) {
                     call.respond(
@@ -126,7 +123,6 @@ fun Application.productRoutes() {
                     return@put
                 }
                 
-                // Apply discount (with database-level concurrency safety)
                 val result = productRepository.applyDiscount(productId, discount)
                 
                 when (result) {

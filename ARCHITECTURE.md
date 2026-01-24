@@ -273,7 +273,6 @@ This test proves that the database-level constraint successfully prevents duplic
    - Appropriate HTTP status codes
 
 6. **Query Optimization**: Improved database query efficiency
-   - Single JOIN query for products with discounts (no N+1 problem)
    - Reduced number of queries in `applyDiscount`
    - Efficient product existence checks
 

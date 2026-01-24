@@ -23,8 +23,8 @@ class ProductRepository {
                 val discounts = productRows
                     .mapNotNull { row ->
                         try {
-                            val discountId = row[DiscountsTable.discountId]
-                            if (discountId.isNotBlank()) {
+                            val discountId = row.getOrNull(DiscountsTable.discountId)
+                            if (discountId != null && discountId.isNotBlank()) {
                                 Discount(
                                     discountId = discountId,
                                     percent = row[DiscountsTable.percent]
@@ -58,8 +58,8 @@ class ProductRepository {
         val discounts = rows
             .mapNotNull { row ->
                 try {
-                    val discountId = row[DiscountsTable.discountId]
-                    if (discountId.isNotBlank()) {
+                    val discountId = row.getOrNull(DiscountsTable.discountId)
+                    if (discountId != null && discountId.isNotBlank()) {
                         Discount(
                             discountId = discountId,
                             percent = row[DiscountsTable.percent]
@@ -92,11 +92,6 @@ class ProductRepository {
     }
     
     fun applyDiscount(productId: String, discount: Discount): DiscountResult = transaction {
-        val existingProduct = getProductById(productId)
-        if (existingProduct == null) {
-            return@transaction DiscountResult.ProductNotFound(productId)
-        }
-        
         try {
             DiscountsTable.insert {
                 it[DiscountsTable.productId] = productId
@@ -104,22 +99,19 @@ class ProductRepository {
                 it[DiscountsTable.percent] = discount.percent
             }
             
-            val updatedProduct = getProductById(productId)
-                ?: throw IllegalStateException("Product disappeared after discount insertion")
+            val product = getProductById(productId)
+                ?: return@transaction DiscountResult.ProductNotFound(productId)
             
-            DiscountResult.Success(updatedProduct)
+            DiscountResult.Success(product)
         } catch (e: Exception) {
             when {
                 e is PSQLException && e.sqlState == "23505" -> {
-                    val currentProduct = getProductById(productId)
-                        ?: throw IllegalStateException("Product not found")
-                    DiscountResult.AlreadyApplied(currentProduct)
+                    val product = getProductById(productId)
+                        ?: return@transaction DiscountResult.ProductNotFound(productId)
+                    DiscountResult.AlreadyApplied(product)
                 }
-                e.message?.contains("duplicate", ignoreCase = true) == true ||
-                e.message?.contains("unique", ignoreCase = true) == true -> {
-                    val currentProduct = getProductById(productId)
-                        ?: throw IllegalStateException("Product not found")
-                    DiscountResult.AlreadyApplied(currentProduct)
+                e is PSQLException && e.sqlState == "23503" -> {
+                    DiscountResult.ProductNotFound(productId)
                 }
                 else -> {
                     DiscountResult.DatabaseError("Database error: ${e.message}")

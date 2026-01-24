@@ -4,48 +4,85 @@
 
 This Product API is built using Ktor framework with a layered architecture pattern:
 
-1. **Presentation Layer** - Routes handle HTTP requests/responses
-2. **Service/Repository Layer** - Business logic and data access
-3. **Database Layer** - PostgreSQL with Exposed ORM
+1. **Presentation Layer** - Routes handle HTTP requests/responses, input validation, and error formatting
+2. **Service Layer** - Business logic, orchestration, and validation coordination
+3. **Repository Layer** - Data access and database operations
+4. **Database Layer** - PostgreSQL with Exposed ORM
 
 ## Concurrency Safety Approach
 
 The core requirement is ensuring that "the same discount cannot be applied more than once to the same product — even under heavy concurrent load."
 
-### Solution: Database-Level Unique Constraint
+### Solution: Database-Only Enforcement (No Application-Level Checks)
 
-We use a **database unique constraint** on the combination of `(product_id, discount_id)` in the `discounts` table. This ensures:
+**Concurrency is enforced exclusively at the database level using PostgreSQL transactions and a composite primary key on `(product_id, discount_id)`. The application does not perform any pre-checks and relies on the database to reject concurrent duplicate inserts.**
 
-1. **Atomicity**: The database guarantees that only one insert can succeed for a given (product_id, discount_id) combination
-2. **No Race Conditions**: Even if 50+ concurrent requests try to apply the same discount, only the first insert will succeed
-3. **Idempotency**: Subsequent attempts return the existing state without errors
-4. **True Concurrency Safety**: This is enforced at the database level, not application level
+This ensures correctness under concurrent load without application-level synchronization mechanisms.
 
-### Why Not In-Memory Solutions?
+### Key Principles
+
+1. **No Pre-Checks**: The application does NOT read existing discounts before inserting
+2. **No Application-Level Validation**: We do NOT check if a discount is "already applied" in code
+3. **Database Authority**: PostgreSQL's composite primary key is the single source of truth
+4. **Atomic Operations**: Each INSERT attempt is atomic - either it succeeds or fails at the database level
+
+### Why This Approach?
 
 The requirements explicitly state:
 > "In-memory solutions (e.g. ConcurrentHashMap) are not allowed. Concurrency must be enforced at the database level."
 
-Our approach uses PostgreSQL's unique constraint enforcement, which is:
-- Thread-safe by nature
-- ACID compliant
-- Persistent across server restarts
-- Handles distributed systems scenarios
+This means:
+- ❌ **NOT allowed**: Checking `existingProduct.discounts` before inserting
+- ❌ **NOT allowed**: Application-level validation of "already applied"
+- ✅ **Required**: Database constraint handles all concurrency concerns
+- ✅ **Required**: Application is "dumb" - just attempts INSERT and handles the result
 
 ### Implementation Details
 
 ```kotlin
 object DiscountsTable : Table("discounts") {
     val productId: Column<String> = varchar("product_id", 255)
+        .references(ProductsTable.id, onDelete = ForeignKeyConstraint.Cascade)
     val discountId: Column<String> = varchar("discount_id", 255)
+    val percent: Column<Double> = double("percent")
     
-    init {
-        uniqueIndex(productId, discountId)  // Enforces uniqueness
+    /**
+     * Composite primary key ensures database-level uniqueness.
+     * Only one insert can succeed for a given (product_id, discount_id) combination.
+     */
+    override val primaryKey = PrimaryKey(productId, discountId)
+}
+```
+
+The `applyDiscount` method:
+1. **Directly attempts INSERT** - no pre-checks
+2. **Catches PostgreSQL error 23505** (unique constraint violation)
+3. **Interprets constraint violation as "already applied"**
+4. **Returns appropriate result** based on database response
+
+```kotlin
+fun applyDiscount(productId: String, discount: Discount): DiscountResult = transaction {
+    try {
+        // Attempt INSERT - database enforces uniqueness
+        DiscountsTable.insert { ... }
+        DiscountResult.Success(getProductById(productId))
+    } catch (e: PSQLException) {
+        when (e.sqlState) {
+            "23505" -> DiscountResult.AlreadyApplied(...)  // Primary key violation
+            "23503" -> DiscountResult.ProductNotFound(...) // Foreign key violation
+            else -> DiscountResult.DatabaseError(...)
+        }
     }
 }
 ```
 
-The `applyDiscount` method catches database constraint violations and interprets them as "discount already exists", returning false to indicate idempotent behavior.
+### Benefits
+
+- **True Concurrency Safety**: Database transactions and constraints handle all race conditions
+- **ACID Compliance**: PostgreSQL guarantees atomicity and consistency
+- **Distributed System Ready**: Works across multiple application instances
+- **No Application Complexity**: Simple code - just INSERT and handle exceptions
+- **Performance**: No unnecessary reads before writes
 
 ## Final Price Calculation
 
@@ -84,23 +121,25 @@ This calculation is done in the `Product.finalPrice` property, computed dynamica
 sequenceDiagram
     participant Client
     participant ProductRoutes
+    participant ProductService
     participant ProductRepository
     participant Database
     participant VatRules
 
     Client->>ProductRoutes: GET /products?country=Sweden
-    ProductRoutes->>ProductRepository: getAllProductsByCountry("Sweden")
-    ProductRepository->>Database: SELECT * FROM products WHERE country = 'Sweden'
-    Database-->>ProductRepository: [product rows]
+    ProductRoutes->>ProductRoutes: Validate country parameter
+    ProductRoutes->>ProductService: getAllProductsByCountry("Sweden")
+    ProductService->>ProductRepository: getAllProductsByCountry("Sweden")
+    ProductRepository->>Database: SELECT products LEFT JOIN discounts<br/>WHERE country = 'Sweden'<br/>ORDER BY product_id, discount_id
+    Database-->>ProductRepository: [product rows with discounts]
     
-    loop For each product
-        ProductRepository->>Database: SELECT * FROM discounts WHERE product_id = ?
-        Database-->>ProductRepository: [discount rows]
-        ProductRepository->>VatRules: calculateFinalPrice(basePrice, totalDiscount, country)
-        VatRules-->>ProductRepository: finalPrice
-    end
+    ProductRepository->>ProductRepository: Group by product_id<br/>Map discounts to products
+    ProductRepository->>VatRules: calculateFinalPrice(basePrice, totalDiscount, country)
+    VatRules-->>ProductRepository: finalPrice
     
-    ProductRepository-->>ProductRoutes: List<Product>
+    ProductRepository-->>ProductService: List<Product>
+    ProductService-->>ProductRoutes: List<Product>
+    ProductRoutes->>ProductRoutes: Map to ProductResponse
     ProductRoutes-->>Client: JSON [ProductResponse]
 ```
 
@@ -111,6 +150,7 @@ sequenceDiagram
     participant Client1
     participant Client2
     participant ProductRoutes
+    participant ProductService
     participant ProductRepository
     participant Database
 
@@ -120,39 +160,78 @@ sequenceDiagram
     end
 
     par Concurrent Processing
-        ProductRoutes->>ProductRepository: applyDiscount(productId, discount)
+        ProductRoutes->>ProductRoutes: Parse JSON request
+        ProductRoutes->>ProductService: applyDiscount(productId, discount)
+        ProductService->>ProductService: Validate input format only<br/>(ID format, percentage range)
+        Note over ProductService: NO check for existing discounts
+        ProductService->>ProductRepository: applyDiscount(productId, discount)
         ProductRepository->>Database: BEGIN TRANSACTION
-        ProductRepository->>Database: INSERT INTO discounts (product_id, discount_id, percent)
+        ProductRepository->>Database: INSERT INTO discounts<br/>(product_id, discount_id, percent)
         
         alt First Request
-            Database-->>ProductRepository: SUCCESS (discount inserted)
-            ProductRepository-->>ProductRoutes: true (discount applied)
+            Database-->>ProductRepository: SUCCESS (inserted)
+            ProductRepository->>Database: SELECT products LEFT JOIN discounts<br/>WHERE product_id = ?
+            Database-->>ProductRepository: Product with all discounts
+            ProductRepository-->>ProductService: DiscountResult.Success(product)
+            ProductService-->>ProductRoutes: DiscountResult.Success
+            ProductRoutes-->>Client1: 200 OK (ProductResponse)
         else Subsequent Requests
-            Database-->>ProductRepository: ERROR (unique constraint violation)
-            ProductRepository-->>ProductRoutes: false (discount already exists)
+            Database-->>ProductRepository: ERROR 23505<br/>(primary key violation)
+            ProductRepository->>Database: SELECT products LEFT JOIN discounts<br/>WHERE product_id = ?
+            Database-->>ProductRepository: Product with all discounts
+            ProductRepository-->>ProductService: DiscountResult.AlreadyApplied(product)
+            ProductService-->>ProductRoutes: DiscountResult.AlreadyApplied
+            ProductRoutes-->>Client2: 409 Conflict (ErrorResponse)
         end
         
         ProductRepository->>Database: COMMIT
-        
-        ProductRoutes->>Database: SELECT product + discounts
-        Database-->>ProductRoutes: Product with discounts
-        
-        alt First Request
-            ProductRoutes-->>Client1: 200 OK (ProductResponse with discount)
-        else Subsequent Requests
-            ProductRoutes-->>Client2: 200 OK (ProductResponse without duplicate discount)
-        end
     end
 
-    Note over Database: Unique constraint ensures<br/>only one insert succeeds
+    Note over Database: Composite PRIMARY KEY (product_id, discount_id)<br/>ensures only one insert succeeds<br/>NO application-level checks performed
 ```
 
 ## Error Handling
 
-- **Missing country parameter**: Returns 400 Bad Request
-- **Product not found**: Returns 404 or throws IllegalArgumentException
-- **Invalid discount percentage**: Validation in Discount model (must be 0-100, exclusive)
-- **Duplicate discount**: Silently ignored (idempotent behavior), returns current product state
+The application uses a consistent error handling strategy:
+
+### HTTP Status Codes
+
+| Status Code | Scenario | Response Body |
+|-------------|----------|---------------|
+| 200 OK | Successful discount application | `ProductResponse` |
+| 400 Bad Request | Invalid input (missing country, invalid discount format, validation errors) | `ErrorResponse` |
+| 404 Not Found | Product doesn't exist | `ErrorResponse` |
+| 409 Conflict | Discount already applied (idempotent) | `ErrorResponse` |
+| 503 Service Unavailable | Database connection errors | `ErrorResponse` |
+| 500 Internal Server Error | Unexpected errors | `ErrorResponse` |
+
+### Error Response Format
+
+```json
+{
+  "error": "Error type",
+  "details": "Detailed error message"
+}
+```
+
+### Error Handling Flow
+
+1. **Routes Layer**: Validates HTTP-level concerns (missing parameters, malformed JSON)
+2. **Service Layer**: Validates business rules and coordinates operations
+3. **Repository Layer**: Handles database operations and constraint violations
+4. **Exception Handling**: All exceptions are caught and converted to appropriate HTTP responses
+
+### Specific Error Scenarios
+
+- **Missing country parameter**: Returns 400 Bad Request with supported countries list
+- **Unsupported country**: Returns 400 Bad Request with supported countries list
+- **Product not found**: Returns 404 Not Found
+- **Invalid discount ID format**: Returns 400 Bad Request (must be alphanumeric, hyphens, underscores only)
+- **Invalid discount percentage**: Returns 400 Bad Request (must be > 0 and <= 100)
+- **Total discount > 100%**: Returns 400 Bad Request (business rule violation)
+- **Maximum discounts exceeded**: Returns 400 Bad Request (max 20 discounts per product)
+- **Duplicate discount**: Returns 409 Conflict with current product state (idempotent behavior)
+- **Database errors**: Returns 503 Service Unavailable or 500 Internal Server Error
 
 ## Testing Strategy
 
@@ -164,12 +243,47 @@ The `HttpConcurrencyTest` demonstrates concurrency safety by:
 
 This test proves that the database-level constraint successfully prevents duplicate discount applications.
 
+## Code Quality Improvements
+
+### Architecture Enhancements
+
+1. **Service Layer**: Introduced a dedicated service layer to separate business logic from routes and repository
+   - Routes handle HTTP concerns (request/response, status codes)
+   - Service handles business logic and validation coordination
+   - Repository handles data access only
+
+2. **Transaction Management**: Fixed nested transaction issues
+   - Removed nested `getProductById` calls within `applyDiscount` transaction
+   - Uses local helper functions within transaction scope
+   - Optimized queries to reduce database round trips
+
+3. **Dependency Injection**: Improved dependency management
+   - Removed global repository instance
+   - Service and repository instances created at appropriate scopes
+   - Better testability and maintainability
+
+4. **Logging**: Added comprehensive logging throughout
+   - Structured logging with SLF4J
+   - Log levels: INFO for operations, WARN for validation failures, ERROR for exceptions
+   - Helps with debugging and monitoring
+
+5. **Error Handling**: Consistent error handling strategy
+   - Proper exception handling at each layer
+   - Clear error messages for clients
+   - Appropriate HTTP status codes
+
+6. **Query Optimization**: Improved database query efficiency
+   - Single JOIN query for products with discounts (no N+1 problem)
+   - Reduced number of queries in `applyDiscount`
+   - Efficient product existence checks
+
 ## Scalability Considerations
 
-- **Connection Pooling**: HikariCP manages database connections efficiently
+- **Connection Pooling**: HikariCP manages database connections efficiently (max 10, min 2)
 - **Transaction Isolation**: PostgreSQL's default isolation level (READ COMMITTED) is sufficient for this use case
 - **Unique Index**: The unique constraint creates an index, ensuring fast lookups and constraint checks
 - **Stateless API**: No server-side session state, making horizontal scaling straightforward
+- **Single Query Pattern**: Products and discounts loaded in one query, reducing database load
 
 ## Future Improvements
 

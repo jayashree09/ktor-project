@@ -4,17 +4,15 @@ import com.example.models.ApplyDiscountRequest
 import com.example.models.Discount
 import com.example.models.DiscountResult
 import com.example.models.ProductResponse
-import com.example.repository.ProductRepository
+import com.example.service.ProductService
 import com.example.validation.CountryValidator
-import com.example.validation.DiscountValidator
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
-
-val productRepository = ProductRepository()
+import org.slf4j.LoggerFactory
 
 @Serializable
 data class ErrorResponse(
@@ -29,11 +27,15 @@ data class SuccessResponse(
 )
 
 fun Application.productRoutes() {
+    val logger = LoggerFactory.getLogger("ProductRoutes")
+    val productService = ProductService(com.example.repository.ProductRepository())
+    
     routing {
         get("/products") {
             val countryParam = call.request.queryParameters["country"]
             
             if (countryParam.isNullOrBlank()) {
+                logger.warn("GET /products called without country parameter")
                 call.respond(
                     HttpStatusCode.BadRequest,
                     ErrorResponse(
@@ -46,6 +48,7 @@ fun Application.productRoutes() {
             
             val normalizedCountry = CountryValidator.normalizeCountry(countryParam)
             if (normalizedCountry == null) {
+                logger.warn("GET /products called with unsupported country: $countryParam")
                 call.respond(
                     HttpStatusCode.BadRequest,
                     ErrorResponse(
@@ -57,7 +60,7 @@ fun Application.productRoutes() {
             }
             
             try {
-                val products = productRepository.getAllProductsByCountry(normalizedCountry)
+                val products = productService.getAllProductsByCountry(normalizedCountry)
                 val productResponses = products.map { product ->
                     ProductResponse(
                         id = product.id,
@@ -69,8 +72,10 @@ fun Application.productRoutes() {
                     )
                 }
                 
+                logger.debug("Returning ${productResponses.size} products for country: $normalizedCountry")
                 call.respond(productResponses)
             } catch (e: Exception) {
+                logger.error("Error fetching products for country $normalizedCountry", e)
                 call.respond(
                     HttpStatusCode.InternalServerError,
                     ErrorResponse(
@@ -84,6 +89,7 @@ fun Application.productRoutes() {
         put("/products/{id}/discount") {
             val productId = call.parameters["id"]
                 ?: run {
+                    logger.warn("PUT /products/{id}/discount called without product ID")
                     call.respond(
                         HttpStatusCode.BadRequest,
                         ErrorResponse(error = "Product ID is required")
@@ -94,36 +100,12 @@ fun Application.productRoutes() {
             try {
                 val request = call.receive<ApplyDiscountRequest>()
                 
-                val existingProduct = productRepository.getProductById(productId)
-                if (existingProduct == null) {
-                    call.respond(
-                        HttpStatusCode.NotFound,
-                        ErrorResponse(
-                            error = "Product not found",
-                            details = "Product with ID '$productId' does not exist"
-                        )
-                    )
-                    return@put
-                }
-                
                 val discount = Discount(
                     discountId = request.discountId,
                     percent = request.percent
                 )
                 
-                val validationResult = DiscountValidator.validateNewDiscount(discount, existingProduct.discounts)
-                if (validationResult is com.example.validation.ValidationResult.Error) {
-                    call.respond(
-                        HttpStatusCode.BadRequest,
-                        ErrorResponse(
-                            error = "Validation error",
-                            details = validationResult.message
-                        )
-                    )
-                    return@put
-                }
-                
-                val result = productRepository.applyDiscount(productId, discount)
+                val result = productService.applyDiscount(productId, discount)
                 
                 when (result) {
                     is DiscountResult.Success -> {
@@ -186,6 +168,7 @@ fun Application.productRoutes() {
                     }
                 }
             } catch (e: io.ktor.serialization.SerializationException) {
+                logger.warn("Invalid JSON in discount request for product $productId: ${e.message}")
                 call.respond(
                     HttpStatusCode.BadRequest,
                     ErrorResponse(
@@ -193,7 +176,17 @@ fun Application.productRoutes() {
                         details = "Failed to parse JSON: ${e.message}"
                     )
                 )
+            } catch (e: IllegalArgumentException) {
+                logger.warn("Invalid discount data for product $productId: ${e.message}")
+                call.respond(
+                    HttpStatusCode.BadRequest,
+                    ErrorResponse(
+                        error = "Validation error",
+                        details = e.message
+                    )
+                )
             } catch (e: Exception) {
+                logger.error("Unexpected error applying discount to product $productId", e)
                 call.respond(
                     HttpStatusCode.InternalServerError,
                     ErrorResponse(

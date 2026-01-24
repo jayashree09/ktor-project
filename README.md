@@ -1,18 +1,26 @@
 ﻿# Country-Based Product API
 
-A Kotlin/Ktor service that manages products and discounts with database-enforced concurrency safety.
+A Kotlin/Ktor service that manages products and discounts with **database-enforced concurrency safety**.
+
+## Key Design Principle
+
+**Concurrency is enforced exclusively at the database level using PostgreSQL transactions and a composite primary key on `(product_id, discount_id)`. The application does not perform any pre-checks and relies on the database to reject concurrent duplicate inserts.**
+
+This ensures correctness under concurrent load without application-level synchronization mechanisms. The application intentionally does not check for existing discounts before inserting - the database constraint is the single source of truth.
 
 ## Features
 
-- Product catalog with country-specific VAT rates
-- Idempotent discount application with concurrency guarantees
-- PostgreSQL-based persistence with unique constraints
-- Thread-safe discount operations
-- Comprehensive input validation and error handling
-- Protection against business logic violations (>100% discounts)
-- Case-insensitive country handling
-- Maximum discount limits per product
-- **Optimized query performance** - Single JOIN query instead of N+1 pattern
+- **Layered Architecture**: Clean separation between routes, service, and repository layers
+- **Product catalog** with country-specific VAT rates
+- **Idempotent discount application** with database-level concurrency guarantees
+- **PostgreSQL-based persistence** with unique constraints for thread safety
+- **Comprehensive validation**: Discount ID format, percentage limits, cumulative discount checks
+- **Error handling**: Consistent error responses with appropriate HTTP status codes
+- **Logging**: Structured logging throughout the application for debugging and monitoring
+- **Optimized queries**: Single JOIN query to avoid N+1 problem
+- **Transaction safety**: Proper transaction management without nested calls
+- **Case-insensitive country handling**
+- **Maximum discount limits** per product (20 discounts max)
 
 ## Prerequisites
 
@@ -259,21 +267,45 @@ curl "http://localhost:8080/products?country=Sweden"
 
 ```
 .
-â”œâ”€â”€ src/
-â”‚   â”œâ”€â”€ main/kotlin/com/example/
-â”‚   â”‚   â”œâ”€â”€ Application.kt
-â”‚   â”‚   â”œâ”€â”€ models/
-â”‚   â”‚   â”œâ”€â”€ database/
-â”‚   â”‚   â”œâ”€â”€ repository/
-â”‚   â”‚   â”œâ”€â”€ routes/
-â”‚   â”‚   â””â”€â”€ validation/
-â”‚   â””â”€â”€ test/kotlin/com/example/
-â”‚       â””â”€â”€ HttpConcurrencyTest.kt
-â”œâ”€â”€ build.gradle.kts
-â”œâ”€â”€ docker-compose.yml
-â”œâ”€â”€ README.md
-â””â”€â”€ ARCHITECTURE.md
+├── src/
+│   ├── main/kotlin/com/example/
+│   │   ├── Application.kt
+│   │   ├── models/
+│   │   │   ├── Product.kt
+│   │   │   ├── Discount.kt
+│   │   │   ├── DiscountResult.kt
+│   │   │   └── VatRules.kt
+│   │   ├── database/
+│   │   │   ├── DatabaseConfig.kt
+│   │   │   └── Tables.kt
+│   │   ├── repository/
+│   │   │   └── ProductRepository.kt
+│   │   ├── service/
+│   │   │   └── ProductService.kt
+│   │   ├── routes/
+│   │   │   └── ProductRoutes.kt
+│   │   ├── validation/
+│   │   │   ├── CountryValidator.kt
+│   │   │   └── DiscountValidator.kt
+│   │   └── exceptions/
+│   │       └── ProductException.kt
+│   └── test/kotlin/com/example/
+│       ├── HttpConcurrencyTest.kt
+│       └── ConcurrencyTest.kt
+├── build.gradle.kts
+├── docker-compose.yml
+├── README.md
+└── ARCHITECTURE.md
 ```
+
+### Architecture Layers
+
+1. **Routes** (`routes/`): HTTP request/response handling, input validation, error formatting
+2. **Service** (`service/`): Business logic, validation coordination, orchestration
+3. **Repository** (`repository/`): Data access, database operations, transaction management
+4. **Models** (`models/`): Domain models and data transfer objects
+5. **Validation** (`validation/`): Input validation rules and validators
+6. **Database** (`database/`): Database configuration and table definitions
 
 ## Environment Variables
 

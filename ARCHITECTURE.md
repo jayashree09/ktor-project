@@ -32,10 +32,10 @@ The requirements explicitly state:
 > "In-memory solutions (e.g. ConcurrentHashMap) are not allowed. Concurrency must be enforced at the database level."
 
 This means:
-- ❌ **NOT allowed**: Checking `existingProduct.discounts` before inserting
-- ❌ **NOT allowed**: Application-level validation of "already applied"
-- ✅ **Required**: Database constraint handles all concurrency concerns
-- ✅ **Required**: Application is "dumb" - just attempts INSERT and handles the result
+- **NOT allowed**: Checking `existingProduct.discounts` before inserting
+- **NOT allowed**: Application-level validation of "already applied"
+- **Required**: Database constraint handles all concurrency concerns
+- **Required**: Application is "dumb" - just attempts INSERT and handles the result
 
 ### Implementation Details
 

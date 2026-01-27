@@ -1,41 +1,40 @@
-# Architecture Document
+# Architecture
 
-## Design Overview
+## Overview
 
-This Product API is built using Ktor framework with a layered architecture pattern:
+The API is built with Ktor and follows a simple layered structure:
 
-1. **Presentation Layer** - Routes handle HTTP requests/responses, input validation, and error formatting
-2. **Service Layer** - Business logic, orchestration, and validation coordination
-3. **Repository Layer** - Data access and database operations
-4. **Database Layer** - PostgreSQL with Exposed ORM
+- Routes handle HTTP requests and responses
+- Service layer contains the business logic
+- Repository handles all database operations
+- PostgreSQL stores the data, using Exposed as the ORM
 
-## Concurrency Safety Approach
+## How Concurrency Works
 
-The core requirement is ensuring that "the same discount cannot be applied more than once to the same product — even under heavy concurrent load."
+The main requirement was making sure the same discount can't be applied twice to a product, even when lots of requests come in at the same time.
 
-### Solution: Database-Only Enforcement (No Application-Level Checks)
+The solution is simple: we don't check anything in the application code. We just try to insert the discount and let PostgreSQL handle it. The database has a composite primary key on `(product_id, discount_id)` that prevents duplicates.
 
-**Concurrency is enforced exclusively at the database level using PostgreSQL transactions and a composite primary key on `(product_id, discount_id)`. The application does not perform any pre-checks and relies on the database to reject concurrent duplicate inserts.**
+When multiple requests try to insert the same discount, PostgreSQL ensures only one succeeds. The others get a constraint violation error. This way we don't need any locks or application-level synchronization.
 
-This ensures correctness under concurrent load without application-level synchronization mechanisms.
+### What We Don't Do
 
-### Key Principles
+- We don't read existing discounts before inserting
+- We don't check if a discount is already applied in the application code
+- We don't use any application-level locks or synchronization
 
-1. **No Pre-Checks**: The application does NOT read existing discounts before inserting
-2. **No Application-Level Validation**: We do NOT check if a discount is "already applied" in code
-3. **Database Authority**: PostgreSQL's composite primary key is the single source of truth
-4. **Atomic Operations**: Each INSERT attempt is atomic - either it succeeds or fails at the database level
+### What We Do Instead
+
+- Just attempt the INSERT directly
+- Let PostgreSQL's primary key constraint handle duplicates
+- Catch the database error if it already exists
+- Return the appropriate response based on what the database tells us
 
 ### Why This Approach?
 
-The requirements explicitly state:
-> "In-memory solutions (e.g. ConcurrentHashMap) are not allowed. Concurrency must be enforced at the database level."
+The requirements were clear: concurrency must be enforced at the database level, not in application code. So instead of trying to be smart and check things first, the application just tries to insert and handles whatever the database says.
 
-This means:
-- **NOT allowed**: Checking `existingProduct.discounts` before inserting
-- **NOT allowed**: Application-level validation of "already applied"
-- **Required**: Database constraint handles all concurrency concerns
-- **Required**: Application is "dumb" - just attempts INSERT and handles the result
+This is actually simpler and more reliable - the database is the single source of truth, and we don't have to worry about race conditions between checking and inserting.
 
 ### Implementation Details
 
@@ -76,42 +75,36 @@ fun applyDiscount(productId: String, discount: Discount): DiscountResult = trans
 }
 ```
 
-### Benefits
+### Why This Works
 
-- **True Concurrency Safety**: Database transactions and constraints handle all race conditions
-- **ACID Compliance**: PostgreSQL guarantees atomicity and consistency
-- **Distributed System Ready**: Works across multiple application instances
-- **No Application Complexity**: Simple code - just INSERT and handle exceptions
-- **Performance**: No unnecessary reads before writes
+PostgreSQL's transactions and primary key constraint handle all the race conditions for us. Since we're not doing any pre-checks, there's no window where two requests could both think a discount doesn't exist and both try to insert it.
 
-## Final Price Calculation
+This also means it works fine if we have multiple instances of the application running - they all hit the same database constraint, so there's no coordination needed between instances.
 
-The final price is calculated using:
+The code is simpler too - just try to insert, catch the exception if it fails, and return the right response.
 
-```
-finalPrice = basePrice × (1 - totalDiscount% / 100) × (1 + VAT%)
-```
+## Price Calculation
 
-Where:
-- `totalDiscount%` = sum of all discount percentages applied to the product
-- `VAT%` = country-specific VAT rate (Sweden: 25%, Germany: 19%, France: 20%)
+Final price = base price × (1 - total discount%) × (1 + VAT%)
 
-This calculation is done in the `Product.finalPrice` property, computed dynamically based on the current discount list.
+The total discount is just the sum of all discount percentages on the product. VAT rates are 25% for Sweden, 19% for Germany, and 20% for France.
+
+This is calculated in the `Product.finalPrice` property whenever we access it, so it's always up to date with the current discounts.
 
 ## Database Schema
 
-### Products Table
-- `id` (String, Primary Key) - Unique product identifier
-- `name` (String) - Product name
-- `base_price` (Double) - Price before tax and discount
-- `country` (String) - Country name
+**Products table:**
+- `id` - product identifier (primary key)
+- `name` - product name
+- `base_price` - price before discounts and VAT
+- `country` - country name
 
-### Discounts Table
-- `product_id` (String, Foreign Key) - References products.id
-- `discount_id` (String) - Unique discount identifier (idempotency key)
-- `percent` (Double) - Discount percentage (0-100, exclusive)
+**Discounts table:**
+- `product_id` - references products.id
+- `discount_id` - the discount identifier
+- `percent` - discount percentage
 
-**Unique Constraint**: `(product_id, discount_id)` - ensures no duplicate discounts per product
+The composite primary key on `(product_id, discount_id)` is what prevents duplicate discounts. This is enforced at the database level, so even concurrent requests can't create duplicates.
 
 ## API Flow Diagrams
 
@@ -192,7 +185,7 @@ sequenceDiagram
 
 ## Error Handling
 
-The application uses a consistent error handling strategy:
+When things go wrong, we return appropriate HTTP status codes:
 
 ### HTTP Status Codes
 
@@ -214,12 +207,7 @@ The application uses a consistent error handling strategy:
 }
 ```
 
-### Error Handling Flow
-
-1. **Routes Layer**: Validates HTTP-level concerns (missing parameters, malformed JSON)
-2. **Service Layer**: Validates business rules and coordinates operations
-3. **Repository Layer**: Handles database operations and constraint violations
-4. **Exception Handling**: All exceptions are caught and converted to appropriate HTTP responses
+Errors are handled at each layer - routes check for missing parameters or bad JSON, service validates business rules, and repository catches database constraint violations. Everything gets converted to appropriate HTTP responses.
 
 ### Specific Error Scenarios
 
@@ -233,62 +221,22 @@ The application uses a consistent error handling strategy:
 - **Duplicate discount**: Returns 409 Conflict with current product state (idempotent behavior)
 - **Database errors**: Returns 503 Service Unavailable or 500 Internal Server Error
 
-## Testing Strategy
+## Testing
 
-The `HttpConcurrencyTest` demonstrates concurrency safety by:
-1. Creating a test product
-2. Launching 50 concurrent HTTP requests to apply the same discount
-3. Verifying that the discount exists exactly once in the database
-4. Confirming final price calculation is correct
+The concurrency test creates a product, fires off 50 simultaneous requests to apply the same discount, and then checks that only one discount ended up in the database. This proves the database constraint is working correctly under load.
 
-This test proves that the database-level constraint successfully prevents duplicate discount applications.
+## Implementation Notes
 
-## Code Quality Improvements
+The code is split into routes, service, and repository layers to keep things organized. Transactions are handled properly - we avoid nested transaction calls and keep queries efficient.
 
-### Architecture Enhancements
+Logging is added throughout so we can see what's happening when things run. Errors are handled consistently at each layer and converted to appropriate HTTP responses.
 
-1. **Service Layer**: Introduced a dedicated service layer to separate business logic from routes and repository
-   - Routes handle HTTP concerns (request/response, status codes)
-   - Service handles business logic and validation coordination
-   - Repository handles data access only
+## Performance Notes
 
-2. **Transaction Management**: Fixed nested transaction issues
-   - Removed nested `getProductById` calls within `applyDiscount` transaction
-   - Uses local helper functions within transaction scope
-   - Optimized queries to reduce database round trips
+The app uses HikariCP for connection pooling (max 10 connections). PostgreSQL's default transaction isolation level (READ COMMITTED) works fine here since we're relying on the primary key constraint for correctness, not isolation level tricks.
 
-3. **Dependency Injection**: Improved dependency management
-   - Removed global repository instance
-   - Service and repository instances created at appropriate scopes
-   - Better testability and maintainability
+The API is stateless, so we can run multiple instances if needed - they'll all hit the same database. Products and discounts are loaded together in a single query to avoid multiple round trips.
 
-4. **Logging**: Added comprehensive logging throughout
-   - Structured logging with SLF4J
-   - Log levels: INFO for operations, WARN for validation failures, ERROR for exceptions
-   - Helps with debugging and monitoring
+## Possible Improvements
 
-5. **Error Handling**: Consistent error handling strategy
-   - Proper exception handling at each layer
-   - Clear error messages for clients
-   - Appropriate HTTP status codes
-
-6. **Query Optimization**: Improved database query efficiency
-   - Reduced number of queries in `applyDiscount`
-   - Efficient product existence checks
-
-## Scalability Considerations
-
-- **Connection Pooling**: HikariCP manages database connections efficiently (max 10, min 2)
-- **Transaction Isolation**: PostgreSQL's default isolation level (READ COMMITTED) is sufficient for this use case
-- **Unique Index**: The unique constraint creates an index, ensuring fast lookups and constraint checks
-- **Stateless API**: No server-side session state, making horizontal scaling straightforward
-- **Single Query Pattern**: Products and discounts loaded in one query, reducing database load
-
-## Future Improvements
-
-1. **Caching**: Add Redis for frequently accessed products
-2. **Validation**: Add more robust input validation and error messages
-3. **Logging**: Add structured logging for monitoring and debugging
-4. **Metrics**: Add Prometheus metrics for monitoring discount application rates
-5. **API Versioning**: Support multiple API versions
-6. **Pagination**: Add pagination for GET /products endpoint
+If this were going to production, things like caching (Redis), better monitoring (Prometheus metrics), API versioning, and pagination for the products endpoint would be worth considering. 

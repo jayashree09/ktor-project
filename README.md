@@ -1,26 +1,27 @@
 ﻿# Country-Based Product API
 
-A Kotlin/Ktor service that manages products and discounts with **database-enforced concurrency safety**.
+A Kotlin/Ktor service for managing products and discounts. The main challenge here was ensuring that the same discount can't be applied twice to a product, even when multiple requests come in at the same time.
 
-## Key Design Principle
+## How Concurrency Works
 
-**Concurrency is enforced exclusively at the database level using PostgreSQL transactions and a composite primary key on `(product_id, discount_id)`. The application does not perform any pre-checks and relies on the database to reject concurrent duplicate inserts.**
+Instead of checking if a discount already exists in the application code, we just try to insert it and let PostgreSQL handle the rest. The database has a composite primary key on `(product_id, discount_id)` which prevents duplicates at the database level.
 
-This ensures correctness under concurrent load without application-level synchronization mechanisms. The application intentionally does not check for existing discounts before inserting - the database constraint is the single source of truth.
+When multiple requests try to apply the same discount:
+- The first one succeeds (200 OK)
+- All others get a primary key violation error from PostgreSQL (409 Conflict)
+- Only one row ends up in the database
 
-## Features
+This way we don't need any locks or application-level checks - the database constraint does all the work.
 
-- **Layered Architecture**: Clean separation between routes, service, and repository layers
-- **Product catalog** with country-specific VAT rates
-- **Idempotent discount application** with database-level concurrency guarantees
-- **PostgreSQL-based persistence** with unique constraints for thread safety
-- **Comprehensive validation**: Discount ID format, percentage limits, cumulative discount checks
-- **Error handling**: Consistent error responses with appropriate HTTP status codes
-- **Logging**: Structured logging throughout the application for debugging and monitoring
-- **Optimized queries**: Single JOIN query to avoid N+1 problem
-- **Transaction safety**: Proper transaction management without nested calls
-- **Case-insensitive country handling**
-- **Maximum discount limits** per product (20 discounts max)
+## What It Does
+
+- Manages a product catalog with country-specific VAT rates (Sweden 25%, Germany 19%, France 20%)
+- Applies discounts to products in a way that's safe under concurrent load
+- Calculates final prices including VAT and all applied discounts
+- Validates discount IDs and percentages
+- Handles errors with proper HTTP status codes
+
+The code is split into routes (HTTP handling), service (business logic), and repository (database access) layers to keep things organized.
 
 ## Prerequisites
 
@@ -28,41 +29,36 @@ This ensures correctness under concurrent load without application-level synchro
 - Docker & Docker Compose (for PostgreSQL)
 - Gradle (wrapper included)
 
-## Quick Start
+## Getting Started
 
-### 1. Start PostgreSQL
+First, make sure PostgreSQL is running. If Docker is installed:
 
 ```bash
 docker-compose up -d
 ```
 
-Wait for PostgreSQL to be ready (about 5-10 seconds).
-
-### 2. Build and Run
+Give it a few seconds to start up, then run the application:
 
 ```bash
 ./gradlew run
 ```
 
-The API will start on `http://localhost:8080`
+The API will be available at `http://localhost:8080`.
 
-### 3. Run Tests
+To run the tests (including the concurrency test that fires 50 simultaneous requests):
 
 ```bash
 ./gradlew test
 ```
 
-The test suite includes a concurrency test that simulates 50 simultaneous discount applications.
-
-## API Usage
+## Using the API
 
 ### Get Products by Country
 
-**Note:** Country names are case-insensitive. Supported countries: Sweden, Germany, France.
+Country names are case-insensitive, so "sweden", "SWEDEN", and "Sweden" all work the same way. Only Sweden, Germany, and France are supported.
 
 ```bash
 curl "http://localhost:8080/products?country=Sweden"
-# Also works: sweden, SWEDEN, sWeDeN
 ```
 
 **Response:**
@@ -87,7 +83,7 @@ curl -X PUT "http://localhost:8080/products/prod-1/discount" \
   -d '{"discountId":"SUMMER2025","percent":10.0}'
 ```
 
-**Success Response (200 OK) - First Application:**
+**First time applying a discount (200 OK):**
 ```json
 {
   "id": "prod-1",
@@ -104,7 +100,7 @@ curl -X PUT "http://localhost:8080/products/prod-1/discount" \
 }
 ```
 
-**Conflict Response (409 Conflict) - Already Applied:**
+**Trying to apply the same discount again (409 Conflict):**
 ```json
 {
   "error": "Discount already applied",
@@ -112,7 +108,7 @@ curl -X PUT "http://localhost:8080/products/prod-1/discount" \
 }
 ```
 
-**Not Found Response (404 Not Found):**
+**Product doesn't exist (404 Not Found):**
 ```json
 {
   "error": "Product not found",
@@ -120,7 +116,7 @@ curl -X PUT "http://localhost:8080/products/prod-1/discount" \
 }
 ```
 
-**Validation Error Response (400 Bad Request):**
+**Invalid input (400 Bad Request):**
 ```json
 {
   "error": "Validation error",
@@ -163,29 +159,13 @@ curl "http://localhost:8080/products?country=Sweden"
 
 ## Validation Rules
 
-The API enforces the following validation rules:
+Discount IDs can only contain letters, numbers, hyphens, and underscores (max 100 characters). So `SUMMER2025` is fine, but `"SALE 2025"` (has a space) or `"SALE!"` (has special char) will be rejected.
 
-### Discount ID Rules:
-- Cannot be blank or empty
-- Maximum length: 100 characters
-- Allowed characters: Letters (A-Z, a-z), numbers (0-9), hyphens (-), underscores (_)
-- Example valid IDs: `SUMMER2025`, `LOYALTY_10`, `EARLY-BIRD`
-- Example invalid IDs: `"SUMMER 2025"` (space), `"SALE!"` (special char), `""` (empty)
+Discount percentages must be greater than 0 and not exceed 100%. Also, the total of all discounts on a product can't exceed 100% - so if we already have 60% off, we can't add another 50%.
 
-### Discount Percentage Rules:
-- Must be greater than 0 (zero not allowed)
-- Cannot exceed 100%
-- Total cumulative discounts on a product cannot exceed 100%
-- Example: If product has 60% discount, cannot add another 50% discount
+Each product can have up to 20 discounts. After that, no more can be added.
 
-### Product Limits:
-- Maximum 20 discounts per product
-- Once limit reached, no additional discounts can be applied
-
-### Country Rules:
-- Only Sweden, Germany, and France are supported
-- Country names are case-insensitive
-- Unsupported countries return 400 Bad Request
+Only Sweden, Germany, and France are supported for now. Country names are case-insensitive.
 
 ## Error Responses
 
@@ -199,69 +179,19 @@ The API enforces the following validation rules:
 
 ## Price Calculation
 
-The final price is calculated as:
+Final price = base price × (1 - total discount%) × (1 + VAT%)
 
-```
-finalPrice = basePrice Ã— (1 - totalDiscount%) Ã— (1 + VAT%)
-```
+VAT rates: Sweden 25%, Germany 19%, France 20%.
 
-**VAT Rates:**
-- Sweden: 25%
-- Germany: 19%
-- France: 20%
+Example: A product with base price 100.0, 10% discount, in Sweden:
+- After discount: 100 × 0.90 = 90.0
+- After VAT: 90.0 × 1.25 = 112.5
 
-**Example:**
-- Base Price: 100.0
-- Discount: 10%
-- VAT (Sweden): 25%
-- Final Price: 100 Ã— 0.90 Ã— 1.25 = **112.5**
+## Testing Concurrency
 
-## Concurrency Testing
+We can test what happens when multiple requests try to apply the same discount at once. Fire off a few requests in parallel - only one should succeed with 200 OK, the rest should get 409 Conflict. The test suite does this automatically with 50 concurrent requests.
 
-Test concurrent discount applications:
-
-```bash
-# Terminal 1-5: Apply the same discount simultaneously
-for i in {1..5}; do
-  curl -X PUT "http://localhost:8080/products/prod-1/discount" \
-    -H "Content-Type: application/json" \
-    -d '{"discountId":"TEST123","percent":5.0}' &
-done
-wait
-```
-
-Only one request will succeed (200 OK), others will return 409 Conflict.
-
-### Advanced Test Scenarios
-
-**Test 1: Validate >100% total discount rejection**
-```bash
-# Apply 60% discount
-curl -X PUT "http://localhost:8080/products/prod-1/discount" \
-  -H "Content-Type: application/json" \
-  -d '{"discountId":"BIG1","percent":60.0}'
-
-# Try to apply 50% discount (should fail - total would be 110%)
-curl -X PUT "http://localhost:8080/products/prod-1/discount" \
-  -H "Content-Type: application/json" \
-  -d '{"discountId":"BIG2","percent":50.0}'
-```
-
-**Test 2: Invalid discount ID format**
-```bash
-# Should fail - contains space
-curl -X PUT "http://localhost:8080/products/prod-1/discount" \
-  -H "Content-Type: application/json" \
-  -d '{"discountId":"INVALID DISCOUNT","percent":10.0}'
-```
-
-**Test 3: Case-insensitive country matching**
-```bash
-curl "http://localhost:8080/products?country=sweden"
-curl "http://localhost:8080/products?country=SWEDEN"
-curl "http://localhost:8080/products?country=Sweden"
-# All three return the same results
-```
+We can test various scenarios - try applying discounts that would exceed 100% total, use invalid discount ID formats, or test with different country name cases. The test suite covers most of these cases.
 
 ## Project Structure
 
@@ -298,22 +228,16 @@ curl "http://localhost:8080/products?country=Sweden"
 └── ARCHITECTURE.md
 ```
 
-### Architecture Layers
+The code is organized into routes (HTTP stuff), service (business logic), repository (database access), models (data structures), validation (input checks), and database (table definitions).
 
-1. **Routes** (`routes/`): HTTP request/response handling, input validation, error formatting
-2. **Service** (`service/`): Business logic, validation coordination, orchestration
-3. **Repository** (`repository/`): Data access, database operations, transaction management
-4. **Models** (`models/`): Domain models and data transfer objects
-5. **Validation** (`validation/`): Input validation rules and validators
-6. **Database** (`database/`): Database configuration and table definitions
+## Configuration
 
-## Environment Variables
+We can override database settings with environment variables:
+- `DATABASE_URL` (default: `jdbc:postgresql://localhost:5432/productdb`)
+- `DATABASE_USER` (default: `postgres`)
+- `DATABASE_PASSWORD` (default: `postgres`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| DATABASE_URL | jdbc:postgresql://localhost:5432/productdb | Database connection URL |
-| DATABASE_USER | postgres | Database username |
-| DATABASE_PASSWORD | postgres | Database password |
+The app uses PostgreSQL's default transaction isolation level (READ COMMITTED), which works fine for this use case since we're relying on the primary key constraint for concurrency safety.
 
 ## Stopping the Application
 
